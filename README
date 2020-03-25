@@ -1,0 +1,3 @@
+aur - simple AUR helper written in POSIX
+
+deps: pacman git jq curl awk sed

@@ -1,0 +1,199 @@
+#!/bin/sh
+#deps: pacman git jq curl awk sed
+#desc: Simple AUR helper written in POSIX
+
+aur_dir=~/.aur
+help_msg="
+aur     i|install   <pkgs>        clone/pull & install packages
+        r|remove    <pkgs>        unistall packages
+
+        u|upgrade   [pkgs=all]    upgrade/install packages
+        y|refresh   [pkgs=all]    update packages' git repositories
+
+        d|details   <pkgs>        view package details
+        s|search    <query>       search aur for matching strings
+
+        c|check                   check for version consistency
+        l|list                    list present git repositories
+"
+
+cd_aur() {
+  if [ -d "$aur_dir" ]
+  then
+    cd "$aur_dir" || return
+  else
+    echo Creating "$aur_dir"
+    mkdir "$aur_dir"
+    cd "$aur_dir" || return
+  fi
+}
+
+
+
+list() {
+  [ -d "$aur_dir" ] && ls "$aur_dir"
+}
+
+search() {
+  curl -s "https://aur.archlinux.org/rpc/?v=5&type=search&arg=$*" | jq --raw-output '
+    .results | sort_by(.Popularity) | reverse | .[] | .Maintainer +"/" +.Name +" " +.Version +"\n    " +.Description
+  '
+}
+
+get_details_query() {
+  query=
+  for pkg in "$@"
+  do query="$query"'&arg[]='"$pkg"
+  done
+  echo "$query"
+}
+
+details() {
+  query=$(get_details_query "$@")
+  curl -s "https://aur.archlinux.org/rpc/?v=5&type=info$query" | jq --raw-output '
+    .results | .[] |
+      (try ("Name          : " +.Name                            +"\n") catch "")+
+      (try ("Version       : " +.Version                         +"\n") catch "")+
+      (try ("Votes         : " +(.NumVotes | tostring)           +"\n") catch "")+
+      (try ("Popularity    : " +(.Popularity | tostring)         +"\n") catch "")+
+      (try ("Description   : " +.Description                     +"\n") catch "")+
+      (try ("URL           : " +.URL                             +"\n") catch "")+
+      (try ("Licenses      : " +(.License | join("  "))          +"\n") catch "")+
+      (try ("Depends On    : " +(.Depends | join("  "))          +"\n") catch "")+
+      (try ("Make Deps     : " +(.MakeDepends | join("  "))      +"\n") catch "")+
+      (try ("Optional Deps : " +(.OptDepends | join("  "))       +"\n") catch "")+
+      (try ("Maintainer    : " +.Maintainer                      +"\n") catch "")
+  '
+}
+
+version() {
+  query=$(get_details_query "$@")
+  curl -s "https://aur.archlinux.org/rpc/?v=5&type=info$query" | jq --raw-output '
+    .results | .[] | .Name +" " +.Version
+  '
+}
+
+check() {
+  list=
+  if [ -d "$aur_dir" ]
+  then
+    cd "$aur_dir" || return
+    fetch=$(version -- *)
+    for pkg in *
+    do
+      pac=$(pacman -Q "$pkg" 2>/dev/null)
+      cur_ver=$(echo "$pac" | awk '{print $2}')
+      rem_ver=$(echo "$fetch" | awk '/'"$pkg"'/{print $2}')
+      [ -z "$cur_ver" ] && cur_ver='#'
+      [ -z "$rem_ver" ] && rem_ver='#'
+      uptodate=
+      if [ "$cur_ver" = "$rem_ver" ]
+      then
+        if [ "$cur_ver" = '#' ]
+        then uptodate='-'
+        else uptodate='up-to-date'
+        fi
+      else
+        if [ "$rem_ver" = '#' ]
+        then uptodate='not-available'
+        elif [ "$cur_ver" = '#' ]
+        then uptodate='not-installed'
+        else uptodate=$rem_ver
+        fi
+      fi
+      list=$list"$pkg#$cur_ver $uptodate\n"
+    done
+  fi
+  echo "$list" | sed 's/\\n/\n/g' | column -t | sort -k 2,1 | sed 's/#/ /'
+}
+
+
+
+has_update() {
+  pkg=$1
+  pac=$(pacman -Q "$pkg" 2>/dev/null)
+  cur_ver=$(echo "$pac" | awk '{print $2}')
+  rem_ver=$(version "$pkg" | awk '{print $2}')
+  [ -z "$cur_ver" ] && cur_ver='#'
+
+  [ -n "$rem_ver" ] && [ "$cur_ver" != "$rem_ver" ]
+}
+
+refresh() {
+  fails=0
+  for pkg in "$@"
+  do
+    cd_aur || return
+    if [ -d "$pkg" ]
+    then
+      cd "$pkg" || continue
+      echo Pulling from "$(git remote get-url origin)"
+      git pull
+    else
+      if [ -n "$(version "$pkg" | awk '{print $2}')" ]
+      then
+        url="https://aur.archlinux.org/$pkg.git"
+        echo Cloning from "$url"
+        git clone "$url" && cd "$pkg" || fails=$((fails+1))
+      else
+        fails=$((fails+1))
+        echo Remote repository "$url" doesn\'t exist
+      fi
+    fi
+    echo
+  done
+  [ $fails -le 0 ]
+}
+
+upgrade() {
+  for pkg in "$@"
+  do
+    if refresh "$pkg" && has_update "$pkg"
+    then
+      printf "%s" ":: Proceed with $pkg upgrade? [Y/n] " && read -r REPLY &&
+        { [ -z "$REPLY" ] || [ "$REPLY" = y ] || [ "$REPLY" = Y ]; } && makepkg -sirc
+      echo
+    fi
+  done
+}
+
+install() {
+  for pkg in "$@"
+  do
+    if refresh "$pkg"
+    then
+      printf "%s" ":: Proceed with $pkg installation? [Y/n] " && read -r REPLY &&
+        { [ -z "$REPLY" ] || [ "$REPLY" = y ] || [ "$REPLY" = Y ]; } && makepkg -sirc
+      echo
+    fi
+  done
+}
+
+remove() {
+  for pkg in "$@"
+  do
+    if pacman -Q "$pkg" >/dev/null
+    then sudo pacman -Rns "$pkg" || continue
+    fi
+    [ -d "$aur_dir/$pkg" ] && rm -rf "${aur_dir:?}/$pkg" && echo
+  done
+}
+
+
+
+if [ $# -ge 1 ]
+then
+  case "$1" in
+    c | check)        check;;
+    l | list | ls)  list;;
+    y | refresh)      shift; refresh $(if [ $# -gt 0 ]; then echo "$@"; else list; fi);;
+    u | upgrade)      shift; upgrade $(if [ $# -gt 0 ]; then echo "$@"; else list; fi);;
+    i | install)      [ $# -ge 2 ] && (shift; install "$@");;
+    r | remove)       [ $# -ge 2 ] && (shift; remove "$@");;
+    d | details)      [ $# -ge 2 ] && (shift; details "$@");;
+    s | search)       [ $# -ge 2 ] && (shift; search "$@");;
+    *) echo "$help_msg";;
+  esac
+else
+  echo "$help_msg"
+fi
