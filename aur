@@ -151,7 +151,7 @@ upgrade() {
     if refresh "$pkg" && has_update "$pkg"
     then
       printf "%s" ":: Proceed with $pkg upgrade? [Y/n] " && read -r REPLY &&
-        { [ -z "$REPLY" ] || [ "$REPLY" = y ] || [ "$REPLY" = Y ]; } && makepkg -sirc
+        { [ -z "$REPLY" ] || [ "$REPLY" = y ] || [ "$REPLY" = Y ]; } && makepkg -sirc --needed --noconfirm
       echo
     fi
   done
@@ -162,8 +162,7 @@ install() {
   do
     if refresh "$pkg"
     then
-      printf "%s" ":: Proceed with $pkg installation? [Y/n] " && read -r REPLY &&
-        { [ -z "$REPLY" ] || [ "$REPLY" = y ] || [ "$REPLY" = Y ]; } && makepkg -sirc
+      makepkg -sirc --needed --noconfirm
       echo
     fi
   done
